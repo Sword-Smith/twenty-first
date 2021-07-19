@@ -1,0 +1,15 @@
+Field 1: ring of integers modulo 270497897142230380135924736767050121217 = 407 * 2^ 119 +1
+Modulus has  128 bits.
+Primitive root of unity: 85408008396924667383611388730472331217 of order 2^ 119
+Field has roughly 2^ 127.668884984266 many elements
+
+Field 2: ring of polynomials modulo x^4 + x + 11 with coefficients in ring of integers modulo 970662608897 = 113 *2^ 33 +1
+Base field modulus has  40 bits.
+Primitive root of unity: 597954131935 of order 2^ 33
+Field has roughly 2^ 159.280715849667 many elements
+
+Field 3: ring of polynomials modulo x^5 + x + 11 with coefficients in ring of integers modulo 3489660929 = 13 *2^ 28 +1
+Base field modulus has  32 bits.
+Primitive root of unity: 1594323 of order 2^ 28
+Field has roughly 2^ 158.502198592773 many elements
+
