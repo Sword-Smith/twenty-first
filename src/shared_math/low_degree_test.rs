@@ -71,7 +71,7 @@ where
     c_proofs: Vec<Vec<CompressedAuthenticationPath<T>>>,
     index_picker_preimage: Vec<u8>,
     max_degree: u32,
-    merkle_roots: Vec<[u8; 32]>,
+    pub merkle_roots: Vec<[u8; 32]>,
     primitive_root_of_unity: T,
     rounds_count: u8,
     pub s: u32,
@@ -98,7 +98,7 @@ impl<U: Clone + Debug + Display + DeserializeOwned + PartialEq + Serialize> LowD
     pub fn from_serialization(
         serialization: Vec<u8>,
         start_index: usize,
-    ) -> Result<LowDegreeProof<U>, Box<dyn Error>> {
+    ) -> Result<(LowDegreeProof<U>, usize), Box<dyn Error>> {
         let mut index = start_index;
         // let slice = serialization.clone().as_slice();
         let codeword_size: u32 = bincode::deserialize(&serialization[index..index + 4])?;
@@ -144,18 +144,21 @@ impl<U: Clone + Debug + Display + DeserializeOwned + PartialEq + Serialize> LowD
             index += proof_size as usize;
             ab_proofs.push(ab_proof);
         }
-        Ok(LowDegreeProof::<U> {
-            ab_proofs,
-            challenge_hash_preimages,
-            codeword_size,
-            c_proofs,
-            index_picker_preimage,
-            max_degree,
-            merkle_roots,
-            primitive_root_of_unity,
-            rounds_count,
-            s,
-        })
+        Ok((
+            LowDegreeProof::<U> {
+                ab_proofs,
+                challenge_hash_preimages,
+                codeword_size,
+                c_proofs,
+                index_picker_preimage,
+                max_degree,
+                merkle_roots,
+                primitive_root_of_unity,
+                rounds_count,
+                s,
+            },
+            index,
+        ))
     }
 }
 
@@ -771,7 +774,7 @@ mod test_low_degree_proof {
             );
         }
 
-        let mut deserialized_proof: LowDegreeProof<BigInt> =
+        let (mut deserialized_proof, _): (LowDegreeProof<BigInt>, usize) =
             LowDegreeProof::<BigInt>::from_serialization(output.clone(), 0).unwrap();
         assert_eq!(1, deserialized_proof.max_degree);
         assert_eq!(4, deserialized_proof.codeword_size);
@@ -820,8 +823,9 @@ mod test_low_degree_proof {
             primitive_root_of_unity.clone(),
         )
         .unwrap();
-        deserialized_proof =
-            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 2).unwrap();
+        deserialized_proof = LowDegreeProof::<BigInt>::from_serialization(output.clone(), 2)
+            .unwrap()
+            .0;
         assert_eq!(deserialized_proof, proof);
         assert_eq!(Ok(()), verify_bigint(deserialized_proof, field.q.clone()));
         assert_eq!(Ok(()), verify_bigint(proof, field.q));
@@ -860,7 +864,7 @@ mod test_low_degree_proof {
         assert_eq!(1, proof.c_proofs.len());
         assert_eq!(2, proof.merkle_roots.len());
 
-        let mut deserialized_proof: LowDegreeProof<i128> =
+        let (mut deserialized_proof, _): (LowDegreeProof<i128>, usize) =
             LowDegreeProof::<i128>::from_serialization(output.clone(), 0).unwrap();
         assert_eq!(1, deserialized_proof.max_degree);
         assert_eq!(4, deserialized_proof.codeword_size);
@@ -908,7 +912,9 @@ mod test_low_degree_proof {
             primitive_root_of_unity,
         )
         .unwrap();
-        deserialized_proof = LowDegreeProof::<i128>::from_serialization(output.clone(), 2).unwrap();
+        deserialized_proof = LowDegreeProof::<i128>::from_serialization(output.clone(), 2)
+            .unwrap()
+            .0;
         assert_eq!(deserialized_proof, proof);
         assert_eq!(Ok(()), verify_i128(deserialized_proof, field.q));
         assert_eq!(Ok(()), verify_i128(proof, field.q));
@@ -943,7 +949,7 @@ mod test_low_degree_proof {
         // Verify that deserialization works *and* gives the expected result
         let deserialized_proof_result =
             LowDegreeProof::<BigInt>::from_serialization(output.clone(), 2);
-        let deserialized_proof = match deserialized_proof_result {
+        let (deserialized_proof, _) = match deserialized_proof_result {
             Err(error) => panic!("{}", error),
             Ok(result) => result,
         };
@@ -1015,7 +1021,9 @@ mod test_low_degree_proof {
         .unwrap();
         assert_eq!(
             proof,
-            LowDegreeProof::<i128>::from_serialization(output.clone(), 5).unwrap()
+            LowDegreeProof::<i128>::from_serialization(output.clone(), 5)
+                .unwrap()
+                .0
         );
         assert_eq!(Ok(()), verify_i128(proof.clone(), field.q));
 
@@ -1089,7 +1097,9 @@ mod test_low_degree_proof {
         .unwrap();
         assert_eq!(
             proof,
-            LowDegreeProof::<i128>::from_serialization(output.clone(), 0).unwrap()
+            LowDegreeProof::<i128>::from_serialization(output.clone(), 0)
+                .unwrap()
+                .0
         );
         assert_eq!(Ok(()), verify_i128(proof, field.q));
     }
@@ -1128,7 +1138,9 @@ mod test_low_degree_proof {
         .unwrap();
         assert_eq!(
             proof,
-            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 0).unwrap()
+            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 0)
+                .unwrap()
+                .0
         );
         assert_eq!(Ok(()), verify_bigint(proof, field.q));
     }
@@ -1182,7 +1194,9 @@ mod test_low_degree_proof {
         println!("rounds in proof = {}", proof.rounds_count);
         assert_eq!(
             proof,
-            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 2).unwrap()
+            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 2)
+                .unwrap()
+                .0
         );
         assert_eq!(Ok(()), verify_bigint(proof.clone(), field.q.clone()));
 
@@ -1236,7 +1250,9 @@ mod test_low_degree_proof {
         .unwrap();
         assert_eq!(
             proof,
-            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 0).unwrap()
+            LowDegreeProof::<BigInt>::from_serialization(output.clone(), 0)
+                .unwrap()
+                .0
         );
         assert_eq!(
             Err(ValidationError::LastIterationNotConstant),
@@ -1277,7 +1293,9 @@ mod test_low_degree_proof {
         println!("rounds in proof = {}", proof.rounds_count);
         assert_eq!(
             proof,
-            LowDegreeProof::<i128>::from_serialization(output.clone(), 2).unwrap()
+            LowDegreeProof::<i128>::from_serialization(output.clone(), 2)
+                .unwrap()
+                .0
         );
         assert_eq!(Ok(()), verify_i128(proof, field.q));
 
@@ -1313,7 +1331,9 @@ mod test_low_degree_proof {
         .unwrap();
         assert_eq!(
             proof,
-            LowDegreeProof::<i128>::from_serialization(output.clone(), 0).unwrap()
+            LowDegreeProof::<i128>::from_serialization(output.clone(), 0)
+                .unwrap()
+                .0
         );
         assert_eq!(
             Err(ValidationError::LastIterationNotConstant),

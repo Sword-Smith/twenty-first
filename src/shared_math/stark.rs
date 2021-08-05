@@ -8,6 +8,7 @@ use crate::shared_math::traits::{IdentityValues, New};
 use crate::util_types::merkle_tree::{CompressedAuthenticationPath, MerkleTree};
 use crate::utils;
 use num_bigint::BigInt;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::error::Error;
 use std::fmt;
@@ -20,7 +21,7 @@ use std::ops::Neg;
 use std::ops::Rem;
 use std::ops::Sub;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum StarkProofError {
     InputOutputMismatch,
     HighDegreeExtendedComputationalTrace,
@@ -39,7 +40,7 @@ impl fmt::Display for StarkProofError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum StarkVerifyError {
     BadAirPaths,
     BadNextAirPaths,
@@ -65,7 +66,7 @@ impl fmt::Display for StarkVerifyError {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct StarkProof<T: Clone + Debug + Serialize + PartialEq> {
     tuple_merkle_root: [u8; 32],
     linear_combination_merkle_root: [u8; 32],
@@ -76,6 +77,7 @@ pub struct StarkProof<T: Clone + Debug + Serialize + PartialEq> {
     bc_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(T, T, T)>>,
     lc_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(T, T, T)>>,
     linear_combination_fri: LowDegreeProof<T>,
+    index_picker_preimage: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -377,6 +379,67 @@ pub fn mimc_backward<'a>(
     res
 }
 
+impl<U: Clone + Debug + Display + DeserializeOwned + PartialEq + Serialize> StarkProof<U> {
+    pub fn from_serialization(
+        transcript: Vec<u8>,
+        start_index: usize,
+    ) -> Result<(StarkProof<U>, usize), Box<dyn Error>> {
+        // tuple Merkle root is first 32 bytes
+        let mut index = start_index;
+        let tuple_merkle_root: [u8; 32] = bincode::deserialize(&transcript[index..index + 32])?;
+        index += 32;
+        let (linear_combination_fri, new_index) =
+            LowDegreeProof::<U>::from_serialization(transcript.clone(), index)?;
+        index = new_index;
+        let index_picker_preimage: Vec<u8> = transcript[0..index].to_vec();
+        let linear_combination_merkle_root: [u8; 32] =
+            bincode::deserialize(&transcript[index..index + 32])?;
+        index += 32;
+
+        // Get LC tuple authentication paths
+        let mut proof_size: u32 = bincode::deserialize(&transcript[index..index + 4])?;
+        index += 4;
+        let lc_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(U, U, U)>> =
+            bincode::deserialize_from(&transcript[index..index + proof_size as usize])?;
+        index += proof_size as usize;
+
+        // Get Next AIR tuple authentication paths
+        proof_size = bincode::deserialize(&transcript[index..index + 4])?;
+        index += 4;
+        let next_air_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(U, U, U)>> =
+            bincode::deserialize_from(&transcript[index..index + proof_size as usize])?;
+        index += proof_size as usize;
+
+        // Get AIR tuple authentication paths
+        proof_size = bincode::deserialize(&transcript[index..index + 4])?;
+        index += 4;
+        let air_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(U, U, U)>> =
+            bincode::deserialize_from(&transcript[index..index + proof_size as usize])?;
+        index += proof_size as usize;
+
+        // Get AIR boundary authentication paths
+        proof_size = bincode::deserialize(&transcript[index..index + 4])?;
+        index += 4;
+        let bc_tuple_authentication_paths: Vec<CompressedAuthenticationPath<(U, U, U)>> =
+            bincode::deserialize_from(&transcript[index..index + proof_size as usize])?;
+        index += proof_size as usize;
+
+        Ok((
+            StarkProof::<U> {
+                tuple_merkle_root,
+                linear_combination_merkle_root,
+                air_tuple_authentication_paths,
+                next_air_tuple_authentication_paths,
+                bc_tuple_authentication_paths,
+                lc_tuple_authentication_paths,
+                linear_combination_fri,
+                index_picker_preimage,
+            },
+            index,
+        ))
+    }
+}
+
 impl StarkProof<BigInt> {
     pub fn verify(
         &self,
@@ -385,8 +448,6 @@ impl StarkProof<BigInt> {
         omega: PrimeFieldElementBig,
         num_steps: i128,
         expansion_factor: i128,
-        // TODO: Should transcript be contained in the proof?
-        transcript: &[u8],
     ) -> Result<(), Box<dyn Error>> {
         let field = claim.input.field;
         let omicron = omega.mod_pow(Into::<BigInt>::into(expansion_factor));
@@ -408,6 +469,8 @@ impl StarkProof<BigInt> {
             ab_indices.push(*b);
         }
         // Verify that Linear combination authentication paths match those committed to in the root hash
+        // Note that the authentication paths *should* be checked in the verifier of the low-degree test.
+        // So we don't need to check that here.
         let lc_tuple_authentication_paths: Vec<
             CompressedAuthenticationPath<(BigInt, BigInt, BigInt)>,
         > = self.lc_tuple_authentication_paths.clone();
@@ -483,8 +546,10 @@ impl StarkProof<BigInt> {
 
         let num_air_checks = self.air_tuple_authentication_paths.len();
         let num_bc_checks = self.bc_tuple_authentication_paths.len();
-        let index_picker_hashes =
-            utils::get_n_hash_rounds(transcript, (num_air_checks + num_bc_checks) as u32);
+        let index_picker_hashes = utils::get_n_hash_rounds(
+            &self.index_picker_preimage,
+            (num_air_checks + num_bc_checks) as u32,
+        );
         let air_indices: Vec<usize> = index_picker_hashes[0..num_air_checks]
             .iter()
             .map(|d| utils::get_index_from_bytes(d, extended_domain_length as usize))
@@ -583,6 +648,175 @@ impl StarkProof<BigInt> {
     }
 }
 
+struct SanityCheckArgs<'a> {
+    num_steps: usize,
+    extended_computational_trace_bigint: Vec<BigInt>,
+    field: PrimeFieldBig,
+    security_checks: usize,
+    omega: PrimeFieldElementBig<'a>,
+    boundary_quotient_codeword_bigint: &'a [BigInt],
+    transition_quotient_codeword_bigint: &'a [BigInt],
+    shifted_transition_quotient_codeword: &'a [PrimeFieldElementBig<'a>],
+    shifted_boundary_quotient_codeword: &'a [PrimeFieldElementBig<'a>],
+    shifted_trace_codeword: &'a [PrimeFieldElementBig<'a>],
+}
+
+fn stark_of_mimc_sanity_checks(args: SanityCheckArgs) -> bool {
+    let num_steps = args.num_steps;
+    let extended_computational_trace_bigint = args.extended_computational_trace_bigint;
+    let field = args.field;
+    let security_checks = args.security_checks;
+    let omega = args.omega;
+    let boundary_quotient_codeword_bigint = args.boundary_quotient_codeword_bigint;
+    let transition_quotient_codeword_bigint = args.transition_quotient_codeword_bigint;
+    let shifted_transition_quotient_codeword = args.shifted_transition_quotient_codeword;
+    let shifted_boundary_quotient_codeword = args.shifted_boundary_quotient_codeword;
+    let shifted_trace_codeword = args.shifted_trace_codeword;
+
+    // SANITY CHECKS START
+    let mut output: Vec<u8> = vec![];
+    // sanity check: low degree of trace
+    let max_degree_ect = num_steps as u32;
+    let low_degree_proof_ect = low_degree_test::prover_bigint(
+        &extended_computational_trace_bigint,
+        field.q.clone(),
+        max_degree_ect,
+        security_checks,
+        &mut output,
+        omega.value.clone(),
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_ect, field.q.clone());
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of extended computational trace",
+            max_degree_ect
+        ),
+        Err(_err) => return false,
+    }
+
+    // sanity check: low degree of boundary quotient
+    let max_degree_bq = num_steps as u32;
+    let low_degree_proof_bq = low_degree_test::prover_bigint(
+        &boundary_quotient_codeword_bigint,
+        field.q.clone(),
+        max_degree_bq,
+        security_checks,
+        &mut output,
+        omega.value.clone(),
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_bq, field.q.clone());
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of boundary quotient",
+            max_degree_bq
+        ),
+        Err(_err) => return false,
+    }
+
+    // sanity check: low degree of transition quotient
+    let max_degree_tq = ((num_steps + 1) * 2 - 1) as u32;
+    let low_degree_proof_tq = low_degree_test::prover_bigint(
+        &transition_quotient_codeword_bigint,
+        field.q.clone(),
+        max_degree_tq,
+        security_checks,
+        &mut output,
+        omega.value.clone(),
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_tq, field.q.clone());
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of transition quotient",
+            max_degree_tq
+        ),
+        Err(_err) => return false,
+    }
+
+    // sanity check: low degee of shifted transition quotient
+    let max_degree_shifted_tq = ((num_steps + 1) * 2 - 1) as u32;
+    let shifted_transition_quotient_codeword_bi = shifted_transition_quotient_codeword
+        .iter()
+        .map(|x| x.value.clone())
+        .collect::<Vec<BigInt>>();
+    let low_degree_proof_shifted_tq = low_degree_test::prover_bigint(
+        &shifted_transition_quotient_codeword_bi,
+        field.q.clone(),
+        max_degree_shifted_tq,
+        security_checks,
+        &mut output,
+        omega.value.clone(),
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_shifted_tq, field.q.clone());
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of shifted transition quotient",
+            max_degree_tq
+        ),
+        Err(_err) => return false,
+    }
+
+    // sanity check: low degree of shifted boundary quotient
+    let max_degree_shifted_bq = ((num_steps + 1) * 2 - 1) as u32;
+    let shifted_boundary_quotient_codeword_bi = shifted_boundary_quotient_codeword
+        .iter()
+        .map(|x| x.value.clone())
+        .collect::<Vec<BigInt>>();
+    let low_degree_proof_shifted_bq = low_degree_test::prover_bigint(
+        &shifted_boundary_quotient_codeword_bi,
+        field.q.clone(),
+        max_degree_shifted_bq,
+        security_checks,
+        &mut output,
+        omega.value.clone(),
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_shifted_bq, field.q.clone());
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of shifted boundary quotient",
+            max_degree_tq
+        ),
+        Err(_err) => return false,
+    }
+
+    // sanity check: low degree of shifted trace
+    let max_degree_shifted_ti = ((num_steps + 1) * 2 - 1) as u32;
+    let shifted_trace_codeword_bi = shifted_trace_codeword
+        .iter()
+        .map(|x| x.value.clone())
+        .collect::<Vec<BigInt>>();
+    let low_degree_proof_shifted_ti = low_degree_test::prover_bigint(
+        &shifted_trace_codeword_bi,
+        field.q.clone(),
+        max_degree_shifted_ti,
+        security_checks,
+        &mut output,
+        omega.value,
+    )
+    .unwrap();
+    let verify: Result<(), low_degree_test::ValidationError> =
+        low_degree_test::verify_bigint(low_degree_proof_shifted_ti, field.q);
+    match verify {
+        Ok(_) => println!(
+            "Succesfully verified low degree ({}) of shifted trace interpolant",
+            max_degree_tq
+        ),
+        Err(_err) => return false,
+    }
+
+    // SANITY CHECKS END
+    true
+}
+
 pub fn stark_of_mimc_prove(
     security_checks: usize,
     num_steps: usize,
@@ -600,6 +834,11 @@ pub fn stark_of_mimc_prove(
     // compute computational trace
     let computational_trace: Vec<PrimeFieldElementBig> =
         mimc_forward(&mimc_claim.input, num_steps, &mimc_claim.round_constants);
+
+    // Verify that the MiMC claim is correct
+    if mimc_claim.output != *computational_trace.last().unwrap() {
+        return Err(StarkProofError::InputOutputMismatch);
+    }
 
     // compute low-degree extension of computational trace
     let (extended_computational_trace, trace_interpolant): (
@@ -770,149 +1009,20 @@ pub fn stark_of_mimc_prove(
         .collect::<Vec<BigInt>>();
     let linear_combination_evaluations_bigint = linear_combination_codeword;
 
-    let mut output = vec![];
+    let sane = stark_of_mimc_sanity_checks(SanityCheckArgs {
+        num_steps,
+        extended_computational_trace_bigint,
+        field: field.clone(),
+        security_checks: 128,
+        omega: omega.clone(),
+        boundary_quotient_codeword_bigint: &boundary_quotient_codeword_bigint,
+        transition_quotient_codeword_bigint: &transition_quotient_codeword_bigint,
+        shifted_transition_quotient_codeword: &shifted_transition_quotient_codeword,
+        shifted_boundary_quotient_codeword: &shifted_boundary_quotient_codeword,
+        shifted_trace_codeword: &shifted_trace_codeword,
+    });
+    assert!(sane);
 
-    // sanity check: low degree of trace
-    let max_degree_ect = num_steps as u32;
-    let low_degree_proof_ect = low_degree_test::prover_bigint(
-        &extended_computational_trace_bigint,
-        field.q.clone(),
-        max_degree_ect,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_ect, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of extended computational trace",
-            max_degree_ect
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeExtendedComputationalTrace),
-    }
-
-    // sanity check: low degree of boundary quotient
-    let max_degree_bq = num_steps as u32;
-    let low_degree_proof_bq = low_degree_test::prover_bigint(
-        &boundary_quotient_codeword_bigint,
-        field.q.clone(),
-        max_degree_bq,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_bq, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of boundary quotient",
-            max_degree_bq
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeBoundaryQuotient),
-        // panic!(
-        //     "Failed to verify low degree ({}) of boundary quotient. Got: {:?}",
-        //     max_degree_bq, err
-        // ),
-    }
-
-    // sanity check: low degree of transition quotient
-    let max_degree_tq = ((num_steps + 1) * 2 - 1) as u32;
-    let low_degree_proof_tq = low_degree_test::prover_bigint(
-        &transition_quotient_codeword_bigint,
-        field.q.clone(),
-        max_degree_tq,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_tq, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of transition quotient",
-            max_degree_tq
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeTransitionQuotient),
-    }
-
-    // sanity check: low degee of shifted transition quotient
-    let max_degree_shifted_tq = ((num_steps + 1) * 2 - 1) as u32;
-    let shifted_transition_quotient_codeword_bi = shifted_transition_quotient_codeword
-        .iter()
-        .map(|x| x.value.clone())
-        .collect::<Vec<BigInt>>();
-    let low_degree_proof_shifted_tq = low_degree_test::prover_bigint(
-        &shifted_transition_quotient_codeword_bi,
-        field.q.clone(),
-        max_degree_shifted_tq,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_shifted_tq, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of shifted transition quotient",
-            max_degree_tq
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeTransitionQuotient),
-    }
-
-    // sanity check: low degree of shifted boundary quotient
-    let max_degree_shifted_bq = ((num_steps + 1) * 2 - 1) as u32;
-    let shifted_boundary_quotient_codeword_bi = shifted_boundary_quotient_codeword
-        .iter()
-        .map(|x| x.value.clone())
-        .collect::<Vec<BigInt>>();
-    let low_degree_proof_shifted_bq = low_degree_test::prover_bigint(
-        &shifted_boundary_quotient_codeword_bi,
-        field.q.clone(),
-        max_degree_shifted_bq,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_shifted_bq, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of shifted boundary quotient",
-            max_degree_tq
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeTransitionQuotient),
-    }
-
-    // sanity check: low degree of shifted trace
-    let max_degree_shifted_ti = ((num_steps + 1) * 2 - 1) as u32;
-    let shifted_trace_codeword_bi = shifted_trace_codeword
-        .iter()
-        .map(|x| x.value.clone())
-        .collect::<Vec<BigInt>>();
-    let low_degree_proof_shifted_ti = low_degree_test::prover_bigint(
-        &shifted_trace_codeword_bi,
-        field.q.clone(),
-        max_degree_shifted_ti,
-        security_checks,
-        &mut output,
-        omega.value.clone(),
-    )
-    .unwrap();
-    let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_shifted_ti, field.q.clone());
-    match verify {
-        Ok(_) => println!(
-            "Succesfully verified low degree ({}) of shifted trace interpolant",
-            max_degree_tq
-        ),
-        Err(_err) => return Err(StarkProofError::HighDegreeTransitionQuotient),
-    }
     // let max_degree_lc = num_steps as u32;
     let max_degree_lc = ((num_steps + 1) * 2 - 1) as u32;
     println!("max_degree of linear combination is: {}", max_degree_lc);
@@ -927,7 +1037,7 @@ pub fn stark_of_mimc_prove(
     );
 
     // sanity check: low degree of linear combination
-    let low_degree_proof_lc: LowDegreeProof<BigInt>;
+    let linear_combination_fri: LowDegreeProof<BigInt>;
     match low_degree_proof_lc_result {
         Err(_err) => return Err(StarkProofError::HighDegreeLinearCombination),
         Ok(proof) => {
@@ -935,16 +1045,13 @@ pub fn stark_of_mimc_prove(
                 "Successfully verified low degree ({}) of linear combination!",
                 max_degree_lc
             );
-            low_degree_proof_lc = proof;
+            linear_combination_fri = proof;
         }
     }
     let verify: Result<(), low_degree_test::ValidationError> =
-        low_degree_test::verify_bigint(low_degree_proof_lc.clone(), field.q.clone());
-    let linear_combination_fri: LowDegreeProof<BigInt>;
+        low_degree_test::verify_bigint(linear_combination_fri.clone(), field.q.clone());
     match verify {
-        Ok(_) => {
-            linear_combination_fri = low_degree_proof_lc;
-        }
+        Ok(_) => (),
         Err(_err) => {
             println!(
                 "\n\n\n\nFailed to low degreeness of linear combination values.\n\n Coefficients: {:?}\n\nCodeword: {:?}\n\nDomain: {:?}",
@@ -978,8 +1085,11 @@ pub fn stark_of_mimc_prove(
     let num_air_checks = security_level;
     let index_picker_hashes: Vec<[u8; 32]> =
         utils::get_n_hash_rounds(&transcript, 2 * security_level as u32);
+    // Before transcript is manipulated, store the preimage that was used to pick the
+    // indices, as this is a field of the STARK proof
+    let index_picker_preimage = transcript.clone();
+
     let air_indices: Vec<usize> = index_picker_hashes[0..num_air_checks]
-        // .slice(0, security_level)
         .iter()
         .map(|d| utils::get_index_from_bytes(d, extended_domain_length))
         .collect();
@@ -995,14 +1105,47 @@ pub fn stark_of_mimc_prove(
     let num_boundary_checks = security_level;
     let bc_indices: Vec<usize> = index_picker_hashes
         [num_air_checks..(num_air_checks + num_boundary_checks)]
-        // .slice(0, security_level)
         .iter()
         .map(|d| utils::get_index_from_bytes(d, extended_domain_length))
         .collect();
 
     let bc_authentication_paths = tuple_merkle_tree.get_multi_proof(&bc_indices);
 
-    // return STARK proof object
+    // Manipulate the transcript to include whole proof
+    // Add LC merkle root
+    transcript.append(&mut bincode::serialize(&linear_combination_mt.get_root()).unwrap());
+
+    // Add LC tuple authentication paths
+    let mut serialized_lc_tuple_authentication_paths =
+        bincode::serialize(&lc_tuple_authentication_paths).unwrap();
+    transcript.append(
+        &mut bincode::serialize(&(serialized_lc_tuple_authentication_paths.len() as u32)).unwrap(),
+    );
+    transcript.append(&mut serialized_lc_tuple_authentication_paths);
+
+    // Add Next AIR Tuple authentication paths
+    let mut serialized_next_air_authentication_paths =
+        bincode::serialize(&next_air_authentication_paths).unwrap();
+    transcript.append(
+        &mut bincode::serialize(&(serialized_next_air_authentication_paths.len() as u32)).unwrap(),
+    );
+    transcript.append(&mut serialized_next_air_authentication_paths);
+
+    // Add AIR Tuple authentication paths
+    let mut serialized_air_authentication_paths =
+        bincode::serialize(&air_authentication_paths).unwrap();
+    transcript.append(
+        &mut bincode::serialize(&(serialized_air_authentication_paths.len() as u32)).unwrap(),
+    );
+    transcript.append(&mut serialized_air_authentication_paths);
+
+    // Add AIR boundary conditions authentication paths
+    let mut serialized_bc_authentication_paths =
+        bincode::serialize(&bc_authentication_paths).unwrap();
+    transcript.append(
+        &mut bincode::serialize(&(serialized_bc_authentication_paths.len() as u32)).unwrap(),
+    );
+    transcript.append(&mut serialized_bc_authentication_paths);
 
     Ok(StarkProof {
         tuple_merkle_root: tuple_merkle_tree.get_root(),
@@ -1012,6 +1155,7 @@ pub fn stark_of_mimc_prove(
         air_tuple_authentication_paths: air_authentication_paths,
         bc_tuple_authentication_paths: bc_authentication_paths,
         linear_combination_fri,
+        index_picker_preimage,
     })
 }
 
@@ -1042,7 +1186,7 @@ mod test_modular_arithmetic {
         println!("Found omega = {}", omega);
         println!("Found omicron = {}", omicron);
 
-        for i in 0..30 {
+        for i in 0..5 {
             println!("i = {}", i);
             let mimc_input = PrimeFieldElementBig::new(b(i), &field);
             let mimc_trace = mimc_forward(&mimc_input, no_steps as usize, &round_constants);
@@ -1050,13 +1194,13 @@ mod test_modular_arithmetic {
             println!("\n\n\n\n\n\n\n\n\n\nmimc_input = {}", mimc_input);
             println!("mimc_output = {}", mimc_output);
             println!("x_last = {}", omicron.mod_pow(b(no_steps - 1)));
-            let mut transcript: Vec<u8> = vec![];
-            let mimc_claim = MimcClaim::<PrimeFieldElementBig> {
+            let mut mimc_claim = MimcClaim::<PrimeFieldElementBig> {
                 input: mimc_input.clone(),
                 output: mimc_output.clone(),
                 round_constants: round_constants.clone(),
             };
-            let stark_res = stark_of_mimc_prove(
+            let mut transcript: Vec<u8> = vec![];
+            let mut stark_res = stark_of_mimc_prove(
                 security_factor,
                 no_steps as usize,
                 expansion_factor as usize,
@@ -1065,21 +1209,89 @@ mod test_modular_arithmetic {
                 &mut transcript,
             );
 
-            let stark_proof: StarkProof<BigInt> = match stark_res {
+            let mut stark_proof: StarkProof<BigInt> = match stark_res {
                 Ok(stark_proof) => stark_proof,
                 Err(_err) => panic!("Failed to produce STARK proof"),
             };
 
+            // Verify that proof can be deserialized correctly
+            let (deserialized_proof, _) =
+                StarkProof::<BigInt>::from_serialization(transcript.clone(), 0).unwrap();
+            assert_eq!(stark_proof, deserialized_proof);
             assert!(stark_proof
                 .verify(
-                    mimc_claim,
+                    mimc_claim.clone(),
                     round_constants.clone(),
                     omega.clone(),
                     no_steps,
                     expansion_factor,
-                    &transcript
                 )
                 .is_ok());
+
+            // Verify that the transcript can be preloaded when the STARK prover begins
+            transcript = vec![123, 45, 67, 89, 52];
+            stark_res = stark_of_mimc_prove(
+                security_factor,
+                no_steps as usize,
+                expansion_factor as usize,
+                omega.clone(),
+                &mimc_claim,
+                &mut transcript,
+            );
+
+            stark_proof = match stark_res {
+                Ok(stark_proof) => stark_proof,
+                Err(_err) => panic!("Failed to produce STARK proof"),
+            };
+
+            // Verify that proof can be deserialized correctly
+            let (deserialized_proof, _) =
+                StarkProof::<BigInt>::from_serialization(transcript.clone(), 5).unwrap();
+            assert_eq!(stark_proof, deserialized_proof);
+
+            // Verify that false Merkle roots result in the correct verification errors
+            stark_proof.tuple_merkle_root[31] ^= 1;
+            let mut bad_verify_result = stark_proof.verify(
+                mimc_claim.clone(),
+                round_constants.clone(),
+                omega.clone(),
+                no_steps,
+                expansion_factor,
+            );
+            assert!(bad_verify_result.is_err());
+            println!("Error is: {:?}", bad_verify_result.as_ref().err());
+            assert!(bad_verify_result.err().unwrap().is::<StarkVerifyError>());
+
+            // Reset bad Merkle root value, and verify that a bad Merkle root in the FRI
+            // proof gives an error
+            stark_proof.tuple_merkle_root[31] ^= 1;
+            stark_proof.linear_combination_fri.merkle_roots[0][31] ^= 1;
+            bad_verify_result = stark_proof.verify(
+                mimc_claim.clone(),
+                round_constants.clone(),
+                omega.clone(),
+                no_steps,
+                expansion_factor,
+            );
+            assert!(bad_verify_result.is_err());
+            println!("Error is now: {:?}", bad_verify_result.as_ref().err());
+            assert!(bad_verify_result
+                .err()
+                .unwrap()
+                .is::<low_degree_test::ValidationError>());
+
+            // Prove with alse MiMC claim and verify that it fails
+            mimc_claim.output = mimc_input.clone();
+            stark_res = stark_of_mimc_prove(
+                security_factor,
+                no_steps as usize,
+                expansion_factor as usize,
+                omega.clone(),
+                &mimc_claim,
+                &mut transcript,
+            );
+            assert!(stark_res.is_err());
+            assert_eq!(Some(StarkProofError::InputOutputMismatch), stark_res.err());
         }
     }
 
