@@ -9,6 +9,13 @@ pub trait IdentityValues {
     fn ring_one(&self) -> Self;
 }
 
+pub trait FieldBatchInversion
+where
+    Self: Sized,
+{
+    fn batch_inversion(&self, elements: Vec<Self>) -> Vec<Self>;
+}
+
 pub trait ModPowU64 {
     fn mod_pow_u64(&self, pow: u64) -> Self;
 }
@@ -18,8 +25,6 @@ pub trait ModPowU64 {
 pub trait New {
     fn new_from_usize(&self, value: usize) -> Self;
 }
-
-// pub trait RingElement: IdentityValues + Add + Sub + Mul + Div + Rem + Neg {}
 
 pub trait FieldElement:
     num_traits::Num
@@ -36,18 +41,3 @@ pub trait FieldElement:
 {
     fn is_power_of_2(&self) -> bool;
 }
-// impl<
-//         T: num_traits::Num
-//             + Clone
-//             + Hash
-//             + Debug
-//             + Display
-//             + PartialEq
-//             + Eq
-//             + PartialOrd
-//             + Ord
-//             + From<i128>
-//             + TryInto<i128>,
-//     > FieldElement for T
-// {
-// }

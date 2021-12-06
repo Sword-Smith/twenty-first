@@ -1,12 +1,10 @@
 use super::prime_field_element_big::{PrimeFieldBig, PrimeFieldElementBig};
-use super::stark::Stark;
+use super::stark::{Stark, DOCUMENT_HASH_LENGTH};
 use crate::shared_math::rescue_prime_stark::RescuePrime;
 use crate::util_types::proof_stream::ProofStream;
 use crate::utils::blake3_digest;
 use rand::RngCore;
 use std::error::Error;
-
-const DOCUMENT_HASH_LENGTH: usize = 32usize;
 
 #[derive(Clone, Debug)]
 pub struct SecretKey<'a> {
@@ -94,17 +92,27 @@ mod test_rpsss {
     fn sign_verify_test() {
         let modulus: BigInt = (407u128 * (1 << 119) + 1).into();
         let field = PrimeFieldBig::new(modulus);
-        let (stark, rp) = test_stark::get_tutorial_stark(&field);
-        let rpsss = RPSSS {
+        let (mut stark, rp): (Stark, RescuePrime) = test_stark::get_tutorial_stark(&field);
+        let rpsss_no_preprocess = RPSSS {
             field: field.clone(),
-            stark,
-            rp,
+            stark: stark.clone(),
+            rp: rp.clone(),
         };
         let document_string: String = "Hello Neptune!".to_string();
         let document: Vec<u8> = document_string.clone().into_bytes();
 
-        let (sk, pk) = rpsss.keygen();
+        let (sk, pk) = rpsss_no_preprocess.keygen();
         println!("secret key = {}, public key = {}", sk.value, pk.value);
+        let signature_res = rpsss_no_preprocess.sign(&sk, &document);
+        assert!(signature_res.is_err(), "Cannot sign without preprocessing");
+
+        stark.prover_preprocess();
+        let rpsss = RPSSS {
+            field: field.clone(),
+            stark: stark.clone(),
+            rp,
+        };
+
         let mut start = Instant::now();
         let mut signature: Signature = rpsss.sign(&sk, &document).unwrap();
         let proof_duration = start.elapsed();

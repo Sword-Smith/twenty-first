@@ -7,6 +7,7 @@ use crate::shared_math::traits::IdentityValues;
 use super::mpolynomial::MPolynomial;
 use super::polynomial::Polynomial;
 
+#[derive(Debug, Clone)]
 pub struct RescuePrime<'a> {
     // field: PrimeFieldBig,
     pub m: usize,
@@ -510,8 +511,7 @@ mod rescue_prime_start_test {
             PrimeFieldElementBig::new(85408008396924667383611388730472331217u128.into(), &field);
         let rescue_prime_stark = RescuePrime::from_tutorial(&field);
 
-        let one = PrimeFieldElementBig::new(1.into(), &field);
-        let stark = Stark::new(
+        let mut stark = Stark::new(
             &field,
             expansion_factor,
             colinearity_checks_count,
@@ -520,6 +520,9 @@ mod rescue_prime_start_test {
             transition_constraints_degree,
             generator,
         );
+        stark.prover_preprocess();
+
+        let one = PrimeFieldElementBig::new(1.into(), &field);
         let trace = rescue_prime_stark.trace(&one);
         let air_constraints = rescue_prime_stark.get_air_constraints(&stark.omicron);
         let hash_result = trace.last().unwrap()[0].clone();

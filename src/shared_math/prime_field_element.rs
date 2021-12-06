@@ -9,6 +9,8 @@ use std::ops::Neg;
 use std::ops::Rem;
 use std::ops::Sub;
 
+use super::traits::FieldBatchInversion;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Hash)]
 pub struct PrimeField {
     pub q: i128,
@@ -212,6 +214,12 @@ pub struct PrimeFieldElement<'a> {
 impl<'a> ModPowU64 for PrimeFieldElement<'a> {
     fn mod_pow_u64(&self, pow: u64) -> Self {
         self.mod_pow(pow.into())
+    }
+}
+
+impl<'a> FieldBatchInversion for PrimeFieldElement<'a> {
+    fn batch_inversion(&self, rhs: Vec<Self>) -> Vec<Self> {
+        self.field.batch_inversion_elements(rhs)
     }
 }
 

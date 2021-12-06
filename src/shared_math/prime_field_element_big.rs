@@ -14,6 +14,8 @@ use std::ops::Rem;
 use std::ops::Sub;
 use std::{fmt, vec};
 
+use super::traits::FieldBatchInversion;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Hash)]
 pub struct PrimeFieldBig {
     pub q: BigInt,
@@ -131,6 +133,7 @@ impl PrimeFieldBig {
     }
 
     pub fn batch_inversion(&self, nums: Vec<BigInt>) -> Vec<BigInt> {
+        // TODO: Panic on 0
         // Adapted from https://paulmillr.com/posts/noble-secp256k1-fast-ecc/#batch-inversion
         let size = nums.len();
         if size == 0 {
@@ -267,6 +270,12 @@ pub struct PrimeFieldElementBig<'a> {
 impl<'a> ModPowU64 for PrimeFieldElementBig<'a> {
     fn mod_pow_u64(&self, pow: u64) -> Self {
         self.mod_pow(pow.into())
+    }
+}
+
+impl<'a> FieldBatchInversion for PrimeFieldElementBig<'a> {
+    fn batch_inversion(&self, rhs: Vec<Self>) -> Vec<Self> {
+        self.field.batch_inversion_elements(rhs)
     }
 }
 

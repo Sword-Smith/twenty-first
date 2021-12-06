@@ -8,6 +8,7 @@ use crate::util_types::merkle_tree::PartialAuthenticationPath;
 use crate::util_types::{merkle_tree::MerkleTree, proof_stream::ProofStream};
 use crate::utils::{blake3_digest, get_index_from_bytes};
 
+use super::ntt::intt;
 use super::{
     other::log_2_ceil,
     prime_field_element_big::{PrimeFieldBig, PrimeFieldElementBig},
@@ -273,8 +274,7 @@ impl Fri {
         Ok(top_level_indices)
     }
 
-    // Verify a FRI proof. Returns evaluated points from the 1st FRI iteration,
-    //
+    // Verify a FRI proof. Returns evaluated points from the 1st FRI iteration.
     pub fn verify(
         &self,
         proof_stream: &mut ProofStream,
@@ -311,19 +311,17 @@ impl Fri {
             last_offset_fe = last_offset_fe.mod_pow(2.into());
         }
 
-        // Compute interpolant
-        let last_domain: Vec<PrimeFieldElementBig> = last_omega_fe
-            .get_generator_domain()
-            .into_iter()
-            .map(|x| x * last_offset_fe.clone())
-            .collect();
+        // Compute interpolant to get the degree of the last codeword
+        // Note that we don't have to scale the polynomial back to the
+        // trace subgroup since we only check its degree and don't use
+        // it further.
         let last_codeword_fes: Vec<PrimeFieldElementBig> = last_codeword
             .iter()
             .map(|x| PrimeFieldElementBig::new(x.clone(), &field))
             .collect();
-        let last_poly =
-            Polynomial::slow_lagrange_interpolation_new(&last_domain, &last_codeword_fes);
-        if last_poly.degree() > degree_of_last_round as isize {
+        let coefficients = intt(&last_codeword_fes, &last_omega_fe);
+        let last_poly_degree: isize = (Polynomial { coefficients }).degree();
+        if last_poly_degree > degree_of_last_round as isize {
             return Err(Box::new(ValidationError::LastIterationTooHighDegree));
         }
 

@@ -12,38 +12,16 @@ use crate::{shared_math::polynomial::Polynomial, util_types::proof_stream::Proof
 
 use super::fri::Fri;
 use super::other::log_2_ceil;
+use super::stark::BoundaryConstraint;
 use super::{
     mpolynomial::MPolynomial,
     prime_field_element_big::{PrimeFieldBig, PrimeFieldElementBig},
 };
 
-pub const DOCUMENT_HASH_LENGTH: usize = 32usize;
-pub const MERKLE_ROOT_HASH_LENGTH: usize = 32usize;
-
-#[derive(Clone, Debug)]
-pub struct BoundaryConstraint<'a> {
-    pub cycle: usize,
-    pub register: usize,
-    pub value: PrimeFieldElementBig<'a>,
-}
-
 // A hashmap from register value to (x, y) value of boundary constraint
 pub type BoundaryConstraintsMap<'a> =
     HashMap<usize, (PrimeFieldElementBig<'a>, PrimeFieldElementBig<'a>)>;
 
-#[derive(Clone, Debug)]
-pub struct StarkPreprocessedValuesProver<'a> {
-    transition_zerofier: Polynomial<PrimeFieldElementBig<'a>>,
-    transition_zerofier_mt: MerkleTree<BigInt>,
-}
-
-#[derive(Clone, Debug)]
-pub struct StarkPreprocessedValues<'a> {
-    transition_zerofier_mt_root: [u8; MERKLE_ROOT_HASH_LENGTH],
-    prover: Option<StarkPreprocessedValuesProver<'a>>,
-}
-
-#[derive(Clone, Debug)]
 pub struct Stark<'a> {
     expansion_factor: usize,
     field: PrimeFieldBig,
@@ -53,11 +31,9 @@ pub struct Stark<'a> {
     omega: PrimeFieldElementBig<'a>,
     pub omicron: PrimeFieldElementBig<'a>, // omicron = omega^expansion_factor
     omicron_domain: Vec<PrimeFieldElementBig<'a>>,
-    omicron_domain_length: usize,
     original_trace_length: usize,
     randomized_trace_length: usize,
     register_count: usize,
-    preprocessed_values: Option<StarkPreprocessedValues<'a>>,
 }
 
 impl<'a> Stark<'a> {
@@ -123,61 +99,10 @@ impl<'a> Stark<'a> {
             omega,
             omicron,
             omicron_domain,
-            omicron_domain_length,
             original_trace_length,
             randomized_trace_length,
             register_count,
             fri,
-            preprocessed_values: None,
-        }
-    }
-
-    /// Set the transition zerofier merkle tree root needed by the verifier
-    /// This is a trusted function where the input value cannot be provided by the prover
-    /// or by an untrusted 3rd party.
-    pub fn set_transition_zerofier_mt_root(
-        &mut self,
-        transition_zerofier_mt_root: [u8; MERKLE_ROOT_HASH_LENGTH],
-    ) {
-        self.preprocessed_values = Some(StarkPreprocessedValues {
-            transition_zerofier_mt_root,
-            prover: None,
-        });
-    }
-
-    // Compute and set the preprocess values for both the prover and verifier, not a trusted
-    // function as all functions are computed locally
-    pub fn prover_preprocess(&mut self) {
-        let transition_zerofier: Polynomial<PrimeFieldElementBig> = Polynomial::fast_zerofier(
-            &self.omicron_domain[..self.original_trace_length - 1],
-            &self.omicron,
-            self.omicron_domain.len(),
-        );
-        let transition_zerofier_codeword: Vec<BigInt> = transition_zerofier
-            .fast_coset_evaluate(&self.field_generator, &self.omega, self.fri.domain_length)
-            .iter()
-            .map(|x| x.value.clone())
-            .collect();
-        let transition_zerofier_mt = MerkleTree::from_vec(&transition_zerofier_codeword);
-        let transition_zerofier_mt_root = transition_zerofier_mt.get_root();
-
-        self.preprocessed_values = Some(StarkPreprocessedValues {
-            transition_zerofier_mt_root,
-            prover: Some(StarkPreprocessedValuesProver {
-                transition_zerofier,
-                transition_zerofier_mt,
-            }),
-        });
-    }
-
-    pub fn ready_for_verify(&self) -> bool {
-        self.preprocessed_values.is_some()
-    }
-
-    pub fn ready_for_prove(&self) -> bool {
-        match &self.preprocessed_values {
-            None => false,
-            Some(preprocessed_values) => preprocessed_values.prover.is_some(),
         }
     }
 }
@@ -189,7 +114,6 @@ pub enum StarkProofError {
     HighDegreeBoundaryQuotient,
     HighDegreeTransitionQuotient,
     HighDegreeLinearCombination,
-    MissingPreprocessedValues,
     NonZeroBoundaryRemainder,
     NonZeroTransitionRemainder,
 }
@@ -206,7 +130,6 @@ impl fmt::Display for StarkProofError {
 pub enum MerkleProofError {
     BoundaryQuotientError(usize),
     RandomizerError,
-    TransitionZerofierError,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -225,7 +148,6 @@ pub enum StarkVerifyError {
     HighDegreeBoundaryQuotient,
     HighDegreeTransitionQuotient,
     HighDegreeLinearCombination,
-    MissingPreprocessedValues,
     NonZeroBoundaryRemainder,
     NonZeroTransitionRemainder,
 }
@@ -357,6 +279,14 @@ impl<'a> Stark<'a> {
         bcs
     }
 
+    // Return a polynomial with roots along the entire trace except
+    // the last point
+    fn transition_zerofier(&self) -> Polynomial<PrimeFieldElementBig> {
+        Polynomial::get_polynomial_with_roots(
+            &self.omicron_domain[0..self.original_trace_length - 1],
+        )
+    }
+
     pub fn prove(
         &self,
         // Trace is indexed as trace[cycle][register]
@@ -365,29 +295,6 @@ impl<'a> Stark<'a> {
         boundary_constraints: Vec<BoundaryConstraint>,
         proof_stream: &mut ProofStream,
     ) -> Result<(), Box<dyn Error>> {
-        if !self.ready_for_prove() {
-            return Err(Box::new(StarkProofError::MissingPreprocessedValues));
-        }
-
-        let transition_zerofier: Polynomial<PrimeFieldElementBig> = self
-            .preprocessed_values
-            .as_ref()
-            .unwrap()
-            .prover
-            .as_ref()
-            .unwrap()
-            .transition_zerofier
-            .clone();
-        let transition_zerofier_mt: MerkleTree<BigInt> = self
-            .preprocessed_values
-            .as_ref()
-            .unwrap()
-            .prover
-            .as_ref()
-            .unwrap()
-            .transition_zerofier_mt
-            .clone();
-
         // Concatenate randomizers
         // TODO: PCG ("permuted congrential generator") is not cryptographically secure; so exchange this for something else like Keccak/SHAKE256
         let mut rng = Pcg64::seed_from_u64(17);
@@ -411,14 +318,12 @@ impl<'a> Stark<'a> {
             .get_generator_values(&self.omicron, randomized_trace.len());
         let mut trace_polynomials = vec![];
         for r in 0..self.register_count {
-            trace_polynomials.push(Polynomial::fast_interpolate(
+            trace_polynomials.push(Polynomial::slow_lagrange_interpolation_new(
                 &randomized_trace_domain,
                 &randomized_trace
                     .iter()
                     .map(|t| t[r].clone())
                     .collect::<Vec<PrimeFieldElementBig>>(),
-                &self.omicron,
-                self.omicron_domain_length,
             ));
         }
 
@@ -441,13 +346,13 @@ impl<'a> Stark<'a> {
         }
 
         // Commit to boundary quotients
+        let fri_domain = self.fri.get_evaluation_domain(&self.field);
         let mut boundary_quotient_merkle_trees: Vec<MerkleTree<BigInt>> = vec![];
+        // for r in 0..self.register_count {
         for bq in boundary_quotients.iter() {
-            let boundary_quotient_codeword: Vec<BigInt> = bq
-                .fast_coset_evaluate(&self.field_generator, &self.omega, self.fri.domain_length)
-                .iter()
-                .map(|x| x.value.clone())
-                .collect();
+            // TODO: Replace with NTT evaluation
+            let boundary_quotient_codeword: Vec<BigInt> =
+                fri_domain.iter().map(|x| bq.evaluate(x).value).collect();
             let bq_merkle_tree = MerkleTree::from_vec(&boundary_quotient_codeword);
             proof_stream.enqueue(&bq_merkle_tree.get_root())?;
             boundary_quotient_merkle_trees.push(bq_merkle_tree);
@@ -474,18 +379,17 @@ impl<'a> Stark<'a> {
             .collect();
 
         // divide out transition zerofier
-        let transition_quotients: Vec<Polynomial<PrimeFieldElementBig>> = transition_polynomials
-            .iter()
-            .map(|tp| {
-                Polynomial::fast_coset_divide(
-                    tp,
-                    &transition_zerofier,
-                    &self.field_generator,
-                    &self.omicron,
-                    self.omicron_domain.len(),
-                )
-            })
-            .collect();
+        let mut transition_quotients: Vec<Polynomial<PrimeFieldElementBig>> =
+            vec![Polynomial::ring_zero(); self.register_count];
+        let transition_zerofier = self.transition_zerofier();
+        for r in 0..self.register_count {
+            let div_res = transition_polynomials[r].divide(transition_zerofier.clone());
+            assert!(
+                div_res.1.is_zero(),
+                "Remainder must be zero when dividing out transition zerofier"
+            );
+            transition_quotients[r] = div_res.0;
+        }
 
         // Commit to randomizer polynomial
         let max_degree = self.max_degree(&transition_constraints);
@@ -500,10 +404,9 @@ impl<'a> Stark<'a> {
             coefficients: randomizer_polynomial_coefficients,
         };
 
-        let randomizer_codeword: Vec<BigInt> = randomizer_polynomial
-            .fast_coset_evaluate(&self.field_generator, &self.omega, self.fri.domain_length)
+        let randomizer_codeword: Vec<BigInt> = fri_domain
             .iter()
-            .map(|x| x.value.clone())
+            .map(|x| randomizer_polynomial.evaluate(x).value)
             .collect();
         let randomizer_mt = MerkleTree::from_vec(&randomizer_codeword);
         proof_stream.enqueue(&randomizer_mt.get_root())?;
@@ -558,11 +461,10 @@ impl<'a> Stark<'a> {
                 sum + pol.scalar_mul(weight.to_owned())
             });
 
-        let combined_codeword = combination.fast_coset_evaluate(
-            &self.field_generator,
-            &self.omega,
-            self.fri.domain_length,
-        );
+        let mut combined_codeword = vec![];
+        for point in fri_domain.iter() {
+            combined_codeword.push(combination.evaluate(point));
+        }
 
         // Prove low degree of combination polynomial, and collect indices
         let indices: Vec<usize> = self.fri.prove(
@@ -599,11 +501,6 @@ impl<'a> Stark<'a> {
         proof_stream
             .enqueue_length_prepended(&randomizer_mt.get_multi_proof(&quadrupled_indices))?;
 
-        // Open indicated positions in the zerofier
-        proof_stream.enqueue_length_prepended(
-            &transition_zerofier_mt.get_multi_proof(&quadrupled_indices),
-        )?;
-
         Ok(())
     }
 
@@ -613,16 +510,6 @@ impl<'a> Stark<'a> {
         transition_constraints: Vec<MPolynomial<PrimeFieldElementBig>>,
         boundary_constraints: Vec<BoundaryConstraint>,
     ) -> Result<(), Box<dyn Error>> {
-        if !self.ready_for_verify() {
-            return Err(Box::new(StarkVerifyError::MissingPreprocessedValues));
-        }
-
-        let transition_zerofier_mt_root: [u8; MERKLE_ROOT_HASH_LENGTH] = self
-            .preprocessed_values
-            .as_ref()
-            .unwrap()
-            .transition_zerofier_mt_root;
-
         // Get Merkle root of boundary quotient codewords
         let mut boundary_quotient_mt_roots: Vec<[u8; 32]> = vec![];
         for _ in 0..self.register_count {
@@ -685,12 +572,12 @@ impl<'a> Stark<'a> {
         }
 
         // Read and verify randomizer leafs
-        let randomizer_authentication_paths: Vec<PartialAuthenticationPath<BigInt>> =
+        let authentication_paths: Vec<PartialAuthenticationPath<BigInt>> =
             proof_stream.dequeue_length_prepended()?;
         let valid = MerkleTree::verify_multi_proof(
             randomizer_mt_root,
             &duplicated_indices,
-            &randomizer_authentication_paths,
+            &authentication_paths,
         );
         if !valid {
             return Err(Box::new(StarkVerifyError::BadMerkleProof(
@@ -701,34 +588,9 @@ impl<'a> Stark<'a> {
         let mut randomizer_values: HashMap<usize, PrimeFieldElementBig> = HashMap::new();
         duplicated_indices
             .iter()
-            .zip(randomizer_authentication_paths.iter())
+            .zip(authentication_paths.iter())
             .for_each(|(index, authentication_path)| {
                 randomizer_values.insert(
-                    *index,
-                    PrimeFieldElementBig::new(authentication_path.get_value(), &self.field),
-                );
-            });
-
-        // Read and verify transition zerofier leafs
-        let transition_zerofier_authentication_paths: Vec<PartialAuthenticationPath<BigInt>> =
-            proof_stream.dequeue_length_prepended()?;
-        let valid = MerkleTree::verify_multi_proof(
-            transition_zerofier_mt_root.to_owned(),
-            &duplicated_indices,
-            &transition_zerofier_authentication_paths,
-        );
-        if !valid {
-            return Err(Box::new(StarkVerifyError::BadMerkleProof(
-                MerkleProofError::TransitionZerofierError,
-            )));
-        }
-
-        let mut transition_zerofier_values: HashMap<usize, PrimeFieldElementBig> = HashMap::new();
-        duplicated_indices
-            .iter()
-            .zip(transition_zerofier_authentication_paths.iter())
-            .for_each(|(index, authentication_path)| {
-                transition_zerofier_values.insert(
                     *index,
                     PrimeFieldElementBig::new(authentication_path.get_value(), &self.field),
                 );
@@ -738,6 +600,7 @@ impl<'a> Stark<'a> {
         let formatted_bcs = self.format_boundary_constraints(boundary_constraints);
         let boundary_zerofiers = get_boundary_zerofiers(formatted_bcs.clone());
         let boundary_interpolants = get_boundary_interpolants(formatted_bcs);
+        let transition_zerofier = self.transition_zerofier();
         let max_degree = self.max_degree(&transition_constraints);
         let boundary_degrees = self.boundary_quotient_degree_bounds(&boundary_zerofiers);
         let expected_tq_degrees = self.transition_quotient_degree_bounds(&transition_constraints);
@@ -780,8 +643,7 @@ impl<'a> Stark<'a> {
                 .iter()
                 .zip(expected_tq_degrees.iter())
             {
-                let transition_quotient =
-                    tcv.to_owned() / transition_zerofier_values[&current_index].clone();
+                let transition_quotient = tcv.to_owned() / transition_zerofier.evaluate(&current_x);
                 terms.push(transition_quotient.clone());
                 let shift = max_degree - tq_degree;
                 terms.push(transition_quotient * current_x.mod_pow(shift.into()));
@@ -816,7 +678,7 @@ impl<'a> Stark<'a> {
 }
 
 #[cfg(test)]
-pub mod test_stark {
+pub mod test_slow_stark {
     use num_bigint::BigInt;
 
     use crate::shared_math::rescue_prime_stark::RescuePrime;
@@ -845,21 +707,6 @@ pub mod test_stark {
             ),
             rescue_prime,
         )
-    }
-
-    #[test]
-    fn ready_for_verify_and_prove_test() {
-        let modulus: BigInt = (407u128 * (1 << 119) + 1).into();
-        let field = PrimeFieldBig::new(modulus);
-        let (mut stark, _) = get_tutorial_stark(&field);
-        assert!(!stark.ready_for_verify());
-        assert!(!stark.ready_for_prove());
-        stark.set_transition_zerofier_mt_root([0u8; MERKLE_ROOT_HASH_LENGTH]);
-        assert!(stark.ready_for_verify());
-        assert!(!stark.ready_for_prove());
-        stark.prover_preprocess();
-        assert!(stark.ready_for_verify());
-        assert!(stark.ready_for_prove());
     }
 
     #[test]
@@ -926,8 +773,7 @@ pub mod test_stark {
     fn rescue_prime_stark() {
         let modulus: BigInt = (407u128 * (1 << 119) + 1).into();
         let field = PrimeFieldBig::new(modulus);
-        let (mut stark, rescue_prime) = get_tutorial_stark(&field);
-        stark.prover_preprocess(); // Prepare STARK for proving
+        let (stark, rescue_prime) = get_tutorial_stark(&field);
 
         let input = PrimeFieldElementBig::new(228894434762048332457318u128.into(), &field);
         let trace = rescue_prime.trace(&input);

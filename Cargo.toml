@@ -37,6 +37,14 @@ harness = false
 name = "ntt"
 harness = false
 
+[[bench]]
+name = "rpsss_bench_sign"
+harness = false
+
+[[bench]]
+name = "rpsss_bench_verify"
+harness = false
+
 [profile.dev]
 opt-level = 0
 debug = true

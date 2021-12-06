@@ -14,7 +14,7 @@ use std::ops::Rem;
 use std::ops::Sub;
 use std::ops::{Add, Neg};
 
-use super::traits::{ModPowU64, New};
+use super::traits::{FieldBatchInversion, ModPowU64, New};
 
 fn degree_raw<T: Add + Div + Mul + Rem + Sub + IdentityValues + Display>(
     coefficients: &[T],
@@ -394,9 +394,11 @@ impl<
             + Div<Output = U>
             + Mul<Output = U>
             + Neg<Output = U>
+            + Sized
             + New
             + Rem
             + ModPowU64
+            + FieldBatchInversion
             + Sub<Output = U>
             + IdentityValues
             + Clone
@@ -523,11 +525,6 @@ impl<
             domain.len(),
             values.len(),
             "Domain and values lengths must match"
-        );
-        assert_eq!(
-            domain.len(),
-            root_order,
-            "Domain length and root order must match"
         );
         assert!(primitive_root.mod_pow_u64(root_order as u64).is_one());
 
@@ -658,10 +655,11 @@ impl<
         let lhs_codeword = ntt(&scaled_lhs_coefficients, &root);
         let rhs_codeword = ntt(&scaled_rhs_coefficients, &root);
 
+        let rhs_inverses = primitive_root.batch_inversion(rhs_codeword);
         let quotient_codeword: Vec<U> = lhs_codeword
             .iter()
-            .zip(rhs_codeword)
-            .map(|(l, r)| l.to_owned() / r)
+            .zip(rhs_inverses)
+            .map(|(l, r)| l.to_owned() * r)
             .collect();
 
         let scaled_quotient_coefficients = intt(&quotient_codeword, &root);
